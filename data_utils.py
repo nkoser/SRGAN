@@ -38,6 +38,81 @@ def display_transform():
     ])
 
 
+def to_tensor():
+    return Compose([ToTensor()])
+
+
+class TrainDataSetUKEHR(Dataset):
+    def __init__(self, high_res_dir):
+        (TrainDataSetUKEHR, self).__init__()
+        self.high_res_dir = high_res_dir
+        self.image_hr_filenames = [join(high_res_dir, x) for x in listdir(high_res_dir) if is_image_file(x)]
+
+    def __getitem__(self, index):
+        #print(self.image_hr_filenames[index])
+        hr_image = Image.open(self.image_hr_filenames[index])  # [:3, :, :]
+        lr_image = Resize(32)(hr_image)
+        return ToTensor()(lr_image)[:3, :, :], ToTensor()(hr_image)[:3, :, :]
+
+    def __len__(self):
+        return len(self.image_hr_filenames)
+
+
+class ValDataSetUKEHR(Dataset):
+    def __init__(self, high_res_dir):
+        (ValDataSetUKEHR, self).__init__()
+        self.high_res_dir = high_res_dir
+        self.image_hr_filenames = [join(high_res_dir, x) for x in listdir(high_res_dir) if is_image_file(x)]
+
+    def __getitem__(self, index):
+        hr_image = Image.open(self.image_hr_filenames[index])
+        lr_image = Resize(32)(hr_image)
+        hr_recover = Resize((128))(lr_image)
+        return ToTensor()(lr_image)[:3, :, :], ToTensor()(hr_recover)[:3, :, :], ToTensor()(hr_image)[:3, :, :]
+
+    def __len__(self):
+        return len(self.image_hr_filenames)
+
+
+class TrainDataSetUKE(Dataset):
+    def __init__(self, low_res_dir, high_res_dir):
+        (TrainDataSetUKE, self).__init__()
+        self.high_res_dir = high_res_dir
+        self.low_res_dir = low_res_dir
+        self.image_hr_filenames = [join(high_res_dir, x) for x in listdir(high_res_dir) if is_image_file(x)]
+        self.image_lr_filenames = [join(low_res_dir, x) for x in listdir(low_res_dir) if is_image_file(x)]
+        self.hr_transform = to_tensor()
+        self.lr_transform = to_tensor()
+
+    def __getitem__(self, index):
+        hr_image = self.hr_transform(Image.open(self.image_hr_filenames[index]))[:3, :, :]
+        lr_image = self.lr_transform(Image.open(self.image_lr_filenames[index]))[:3, :, :]
+        return lr_image, hr_image
+
+    def __len__(self):
+        return len(self.image_hr_filenames)
+
+
+class ValDataSetUKE(Dataset):
+    def __init__(self, low_res_dir, high_res_dir):
+        (ValDataSetUKE, self).__init__()
+        self.high_res_dir = high_res_dir
+        self.low_res_dir = low_res_dir
+        self.image_hr_filenames = [join(high_res_dir, x) for x in listdir(high_res_dir) if is_image_file(x)]
+        self.image_lr_filenames = [join(low_res_dir, x) for x in listdir(low_res_dir) if is_image_file(x)]
+        self.hr_transform = to_tensor()
+        self.lr_transform = to_tensor()
+
+    def __getitem__(self, index):
+        hr_image = self.hr_transform(Image.open(self.image_hr_filenames[index]))[:3, :, :]
+        lr_image = self.lr_transform(Image.open(self.image_lr_filenames[index]))[:3, :, :]
+        # print(hr_image, lr_image)
+        return lr_image, lr_image, hr_image
+
+    def __len__(self):
+        return len(self.image_hr_filenames)
+
+
 class TrainDatasetFromFolder(Dataset):
     def __init__(self, dataset_dir, crop_size, upscale_factor):
         super(TrainDatasetFromFolder, self).__init__()

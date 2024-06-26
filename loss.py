@@ -1,11 +1,15 @@
 import torch
 from torch import nn
-from torchvision.models.vgg import vgg16
+from torchvision.models.vgg import vgg16, vgg19
 
 
 class GeneratorLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, perceptual_weight, adv_weight, mse_weight, tv_weight):
         super(GeneratorLoss, self).__init__()
+        self.tv_weight = tv_weight
+        self.mse_weight = mse_weight
+        self.adv_weight = adv_weight
+        self.perceptual_weight = perceptual_weight
         vgg = vgg16(pretrained=True)
         loss_network = nn.Sequential(*list(vgg.features)[:31]).eval()
         for param in loss_network.parameters():
@@ -23,7 +27,25 @@ class GeneratorLoss(nn.Module):
         image_loss = self.mse_loss(out_images, target_images)
         # TV Loss
         tv_loss = self.tv_loss(out_images)
-        return image_loss + 0.001 * adversarial_loss + 0.006 * perception_loss + 2e-8 * tv_loss
+        return self.mse_weight * image_loss + self.adv_weight * adversarial_loss + self.perceptual_weight * perception_loss + self.tv_weight * tv_loss
+
+
+class EGeneratorLoss(GeneratorLoss):
+    def __init__(self, perceptual_weight, adv_weight, mse_weight, tv_weight):
+        super(EGeneratorLoss, self).__init__(perceptual_weight, adv_weight, mse_weight, tv_weight)
+        self.loss_network = vgg19(pretrained=True).features[:35].eval()
+        for param in self.loss_network.parameters():
+            param.requires_grad = False
+
+        self.l1_criterion = nn.L1Loss()
+        self.l1_weight = self.mse_weight
+
+    def forward(self, out_labels, out_images, target_images):
+        adversarial_loss = self.adv_weight * -out_labels
+        vgg_loss = self.mse_loss(self.loss_network(out_images), self.loss_network(target_images))
+        l1_loss = self.l1_criterion(out_images, target_images)
+        loss = vgg_loss + self.l1_weight * l1_loss + adversarial_loss
+        return loss
 
 
 class TVLoss(nn.Module):
@@ -46,6 +68,28 @@ class TVLoss(nn.Module):
         return t.size()[1] * t.size()[2] * t.size()[3]
 
 
+def gradient_penalty(critic, real, fake, device):
+    batch_size, channels, height, width = real.shape
+    alpha = torch.rand((batch_size, 1, 1, 1)).repeat(1, channels, height, width).to(device)
+    interpolated_images = real * alpha + fake.detach() * (1 - alpha)
+    interpolated_images.requires_grad_(True)
+
+    mixed_scores = critic(interpolated_images)
+
+    gradient = torch.autograd.grad(
+        inputs=interpolated_images,
+        outputs=mixed_scores,
+        grad_outputs=torch.ones_like(mixed_scores),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+    gradient = gradient.view(gradient.shape[0], -1)
+    gradient_norm = gradient.norm(2, dim=1)
+    gradient_penalty = torch.mean((gradient_norm - 1) ** 2)
+
+    return gradient_penalty
+
+
 if __name__ == "__main__":
-    g_loss = GeneratorLoss()
-    print(g_loss)
+    pass
+    # print(g_loss)
