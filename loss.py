@@ -1,6 +1,9 @@
 import torch
 from torch import nn
 from torchvision.models.vgg import vgg16, vgg19
+from torchvision.transforms import Normalize
+
+from model import IdentityConv2
 
 
 class GeneratorLoss(nn.Module):
@@ -11,23 +14,35 @@ class GeneratorLoss(nn.Module):
         self.adv_weight = adv_weight
         self.perceptual_weight = perceptual_weight
         vgg = vgg16(pretrained=True)
+
+        # layers = [IdentityConv2()]
+        # layers.extend(list(vgg.features)[1:31])
+        # loss_network = nn.Sequential(*layers)
+
         loss_network = nn.Sequential(*list(vgg.features)[:31]).eval()
+
         for param in loss_network.parameters():
             param.requires_grad = False
         self.loss_network = loss_network
         self.mse_loss = nn.MSELoss()
         self.tv_loss = TVLoss()
 
-    def forward(self, out_labels, out_images, target_images):
+    def forward(self, out_labels, out_images, target_images, only_gen):
+        out_images = out_images.repeat(1, 3, 1, 1)
+        target_images = target_images.repeat(1, 3, 1, 1)
         # Adversarial Loss
         adversarial_loss = torch.mean(1 - out_labels)
         # Perception Loss
-        perception_loss = self.mse_loss(self.loss_network(out_images), self.loss_network(target_images))
+        perception_loss = self.mse_loss(self.loss_network(normalize_vgg(out_images)),
+                                        self.loss_network(normalize_vgg(target_images)))
         # Image Loss
         image_loss = self.mse_loss(out_images, target_images)
         # TV Loss
         tv_loss = self.tv_loss(out_images)
-        return self.mse_weight * image_loss + self.adv_weight * adversarial_loss + self.perceptual_weight * perception_loss + self.tv_weight * tv_loss
+        if only_gen:
+            return self.mse_weight * image_loss + self.perceptual_weight * perception_loss + self.tv_weight * tv_loss
+        else:
+            return self.adv_weight * adversarial_loss + self.mse_weight * image_loss + self.perceptual_weight * perception_loss + self.tv_weight * tv_loss
 
 
 class EGeneratorLoss(GeneratorLoss):
@@ -40,7 +55,7 @@ class EGeneratorLoss(GeneratorLoss):
         self.l1_criterion = nn.L1Loss()
         self.l1_weight = self.mse_weight
 
-    def forward(self, out_labels, out_images, target_images):
+    def forward(self, out_labels, out_images, target_images, only_gen):
         adversarial_loss = self.adv_weight * -out_labels
         vgg_loss = self.mse_loss(self.loss_network(out_images), self.loss_network(target_images))
         l1_loss = self.l1_criterion(out_images, target_images)
@@ -88,6 +103,10 @@ def gradient_penalty(critic, real, fake, device):
     gradient_penalty = torch.mean((gradient_norm - 1) ** 2)
 
     return gradient_penalty
+
+
+def normalize_vgg(x):
+    return Normalize([0.48235, 0.45882, 0.40784], [0.00392156862745098, 0.00392156862745098, 0.00392156862745098])(x)
 
 
 if __name__ == "__main__":

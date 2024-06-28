@@ -1,21 +1,23 @@
 data_dir : '/views/data-acc/RW/sukin707/superresolution/data'
 root_dir : '/views/data-acc/RW/sukin707/superresolution/'
 
-exp_name : 'ESRGAN_VOC2012_001'
+exp_name : 'SRAGN_GENERATOR_UKE_003'
 
 crop_size : 88
 upscale_factor : 4 # 2,4,8
 num_epochs : 300
 
-gan : 'esrgan' # esrgan
+num_channel : 1
 
-dataset : 'VOC2012' # VOC2012 # UKE # UKEHR
+gan : 'srgan' # esrgan
+
+dataset : 'UKE' # VOC2012 # UKE # UKEHR
 
 
-perceptual_weight : 0.006 #0.006
-adv_weight : 0.001 #5e-3 #0.001
+perceptual_weight : 0.006 #0.006 #0.006
+adv_weight : 0 #0.001 #5e-3 #0.001
 mse_weight: 1 #0.01 #1e-2 # for esrgan use mse weight as l1_weight
-tv_weight: 0.00000002 #2e-8
+tv_weight: 0 #0.00000002 #2e-8
 gp_weight : 10
 
-warm_up : -1
+warm_up : 300

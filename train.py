@@ -4,7 +4,7 @@ from os.path import join
 
 from esrgan import EGenerator, EDiscriminator
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from math import log10
 
 import pandas as pd
@@ -27,6 +27,42 @@ from utils import read_yaml_file, get_device
 # parser.add_argument('--upscale_factor', default=4, type=int, choices=[2, 4, 8],
 # help='super resolution upscale factor')
 # parser.add_argument('--num_epochs', default=100, type=int, help='train epoch number')
+
+
+def load_gen(opt_dict):
+    if opt_dict['dataset'] == 'VOC2012':
+        train_set = TrainDatasetFromFolder(join(DATA_DIR, 'VOC2012_train'), crop_size=CROP_SIZE,
+                                           upscale_factor=UPSCALE_FACTOR, num_channel=NUM_CHANNEL)
+        val_set = ValDatasetFromFolder(join(DATA_DIR, 'VOC2012_val'), upscale_factor=UPSCALE_FACTOR,
+                                       num_channel=NUM_CHANNEL)
+    elif opt_dict['dataset'] == 'UKE':
+        train_set = TrainDataSetUKE(join(DATA_DIR, 'UKE_pt_train', 'low_res'),
+                                    join(DATA_DIR, 'UKE_pt_train', 'high_res'))
+        val_set = ValDataSetUKE(join(DATA_DIR, 'UKE_pt_val', 'low_res'), join(DATA_DIR, 'UKE_pt_val', 'high_res'))
+    elif opt_dict['dataset'] == 'UKEHR':
+        train_set = TrainDataSetUKEHR(join(DATA_DIR, 'UKE_pt_train', 'high_res'))
+        val_set = ValDataSetUKEHR(join(DATA_DIR, 'UKE_pt_val', 'high_res'))
+    else:
+        raise ValueError('Please use one of the following: VOC2012,UKE or UKEHR')
+    train_loader = DataLoader(dataset=train_set, num_workers=4, batch_size=64, shuffle=True)
+    val_loader = DataLoader(dataset=val_set, num_workers=4, batch_size=1, shuffle=False)
+
+    return train_loader,val_loader
+
+
+def load_gan(opt_dict):
+    if GAN == 'srgan':
+        netG = Generator(UPSCALE_FACTOR, num_channel=NUM_CHANNEL).to(device)
+        netD = Discriminator(num_channel=NUM_CHANNEL).to(device)
+    elif GAN == 'esrgan':
+        netG = EGenerator(num_channels=NUM_CHANNEL).to(device)
+        netD = Discriminator(num_channel=NUM_CHANNEL).to(device)  # EDiscriminator().to(device)
+    else:
+        raise ValueError('Please use one of the following: srgan or esrgan')
+    print('# generator parameters:', sum(param.numel() for param in netG.parameters()))
+    print('# discriminator parameters:', sum(param.numel() for param in netD.parameters()))
+
+    return netG,netD
 
 
 if __name__ == '__main__':
@@ -52,38 +88,18 @@ if __name__ == '__main__':
     GP_WEIGHT = opt_dict['gp_weight']
     WARM_UP = opt_dict['warm_up']
 
+    NUM_CHANNEL = opt_dict['num_channel']
+
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # get device
     device = get_device()
 
-    if opt_dict['dataset'] == 'VOC2012':
-        train_set = TrainDatasetFromFolder(join(DATA_DIR, 'VOC2012_train'), crop_size=CROP_SIZE,
-                                           upscale_factor=UPSCALE_FACTOR)
-        val_set = ValDatasetFromFolder(join(DATA_DIR, 'VOC2012_val'), upscale_factor=UPSCALE_FACTOR)
-    elif opt_dict['dataset'] == 'UKE':
-        train_set = TrainDataSetUKE(join(DATA_DIR, 'UKE_train', 'low_res'), join(DATA_DIR, 'UKE_train', 'high_res'))
-        val_set = ValDataSetUKE(join(DATA_DIR, 'UKE_val', 'low_res'), join(DATA_DIR, 'UKE_val', 'high_res'))
-    elif opt_dict['dataset'] == 'UKEHR':
-        train_set = TrainDataSetUKEHR(join(DATA_DIR, 'UKE_train', 'high_res'))
-        val_set = ValDataSetUKEHR(join(DATA_DIR, 'UKE_val', 'high_res'))
-    else:
-        raise ValueError('Please use one of the following: VOC2012,UKE or UKEHR')
+    # Load train_loader and validation loader
+    train_loader, val_loader = load_gen(opt_dict)
 
-    train_loader = DataLoader(dataset=train_set, num_workers=4, batch_size=64, shuffle=True)
-    val_loader = DataLoader(dataset=val_set, num_workers=4, batch_size=1, shuffle=False)
-
-    if GAN == 'srgan':
-        netG = Generator(UPSCALE_FACTOR).to(device)
-        netD = Discriminator().to(device)
-    elif GAN == 'esrgan':
-        netG = EGenerator().to(device)
-        netD = Discriminator().to(device)  # EDiscriminator().to(device)
-    else:
-        raise ValueError('Please use one of the following: srgan or esrgan')
-
-    print('# generator parameters:', sum(param.numel() for param in netG.parameters()))
-    print('# discriminator parameters:', sum(param.numel() for param in netD.parameters()))
+    # Load GAN Network
+    netG, netD = load_gan(opt_dict)
 
     # if GAN == 'srgan':
     generator_criterion = GeneratorLoss(tv_weight=TV_WEIGHT,
@@ -113,13 +129,13 @@ if __name__ == '__main__':
 
             z = Variable(data)
             z = z.to(device)
+            real_img = Variable(target)
+            real_img = real_img.to(device)
 
             if WARM_UP < epoch:
                 ############################
                 # (1) Update D network: maximize D(x)-1-D(G(z))
                 ###########################
-                real_img = Variable(target)
-                real_img = real_img.to(device)
                 fake_img = netG(z)
 
                 # if GAN == 'esrgan':
@@ -146,7 +162,7 @@ if __name__ == '__main__':
             fake_img = netG(z)
             fake_out = netD(fake_img).mean()
             ##
-            g_loss = generator_criterion(fake_out, fake_img, real_img)
+            g_loss = generator_criterion(fake_out, fake_img, real_img, epoch > WARM_UP)
             g_loss.backward()
 
             fake_img = netG(z)
@@ -229,10 +245,10 @@ if __name__ == '__main__':
         results['psnr'].append(valing_results['psnr'])
         results['ssim'].append(valing_results['ssim'])
 
-        if epoch % 10 == 0 and epoch != 0:
+        if epoch % 10 == 1 and epoch != 0:
             out_path = join(RESULTS_DIR, 'statistics/')
             os.makedirs(out_path, exist_ok=True)
-            if WARM_UP < epoch:
+            if WARM_UP >= epoch:
                 data_frame = pd.DataFrame(
                     data={'Loss_G': results['g_loss'],
                           'Score_G': results['g_score'], 'PSNR': results['psnr'], 'SSIM': results['ssim']},

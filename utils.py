@@ -32,9 +32,15 @@ def read_yaml_file(file_path: str) -> Union[None, dict]:
             print(f"Error reading YAML file {file_path}: {e}")
             return None
 
-def create_directories(paths:list) -> None:
+
+def create_directories(paths: list) -> None:
     for path in paths:
         os.makedirs(path, exist_ok=True)
 
+
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def file_ends_with(name: str):
+    return name.split(".")[-1].lower()
