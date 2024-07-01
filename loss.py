@@ -1,48 +1,56 @@
+import monai
 import torch
 from torch import nn
 from torchvision.models.vgg import vgg16, vgg19
 from torchvision.transforms import Normalize
 
-from model import IdentityConv2
-
 
 class GeneratorLoss(nn.Module):
-    def __init__(self, perceptual_weight, adv_weight, mse_weight, tv_weight):
+    def __init__(self, config):
         super(GeneratorLoss, self).__init__()
-        self.tv_weight = tv_weight
-        self.mse_weight = mse_weight
-        self.adv_weight = adv_weight
-        self.perceptual_weight = perceptual_weight
-        vgg = vgg16(pretrained=True)
+        self.tv_weight = config['tv_weight']
+        self.mse_weight = config['mse_weight']
+        self.adv_weight = config['adv_weight']
+        self.l1_weight = config['l1_weight']
+        self.perceptual_weight = config['perceptual_weight']
+        # vgg = vgg16(pretrained=True)
 
         # layers = [IdentityConv2()]
         # layers.extend(list(vgg.features)[1:31])
         # loss_network = nn.Sequential(*layers)
 
-        loss_network = nn.Sequential(*list(vgg.features)[:31]).eval()
+        # loss_network = nn.Sequential(*list(vgg.features)[:31]).eval()
 
-        for param in loss_network.parameters():
-            param.requires_grad = False
-        self.loss_network = loss_network
+        # for param in loss_network.parameters():
+        #    param.requires_grad = False
+
+        self.loss_network = monai.losses.PerceptualLoss(spatial_dims=2,
+                                                        network_type=config['perceptual_loss'])  # loss_network
         self.mse_loss = nn.MSELoss()
+        self.L1_loss = nn.L1Loss()
         self.tv_loss = TVLoss()
 
     def forward(self, out_labels, out_images, target_images, only_gen):
-        out_images = out_images.repeat(1, 3, 1, 1)
-        target_images = target_images.repeat(1, 3, 1, 1)
+        if out_images.shape[1] == 1:
+            out_images = out_images.repeat(1, 3, 1, 1)
+            target_images = target_images.repeat(1, 3, 1, 1)
         # Adversarial Loss
         adversarial_loss = torch.mean(1 - out_labels)
         # Perception Loss
-        perception_loss = self.mse_loss(self.loss_network(normalize_vgg(out_images)),
-                                        self.loss_network(normalize_vgg(target_images)))
+        #perception_loss = self.mse_loss(self.loss_network(normalize_vgg(out_images)),
+         #                               self.loss_network(normalize_vgg(target_images)))
+        perception_loss = self.loss_network(out_images, target_images)
         # Image Loss
         image_loss = self.mse_loss(out_images, target_images)
         # TV Loss
         tv_loss = self.tv_loss(out_images)
+        l1_loss = self.L1_loss(out_images, target_images)
         if only_gen:
-            return self.mse_weight * image_loss + self.perceptual_weight * perception_loss + self.tv_weight * tv_loss
+            return (self.mse_weight * image_loss + self.perceptual_weight * perception_loss +
+                    self.tv_weight * tv_loss + self.l1_weight * l1_loss)
         else:
-            return self.adv_weight * adversarial_loss + self.mse_weight * image_loss + self.perceptual_weight * perception_loss + self.tv_weight * tv_loss
+            return (self.adv_weight * adversarial_loss + self.mse_weight * image_loss +
+                    self.perceptual_weight * perception_loss + self.tv_weight * tv_loss + self.l1_weight * l1_loss)
 
 
 class EGeneratorLoss(GeneratorLoss):

@@ -1,6 +1,6 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 from typing import Union
-
 import numpy as np
 import torch
 import yaml

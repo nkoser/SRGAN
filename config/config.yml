@@ -1,23 +1,29 @@
 data_dir : '/views/data-acc/RW/sukin707/superresolution/data'
 root_dir : '/views/data-acc/RW/sukin707/superresolution/'
 
-exp_name : 'SRAGN_GENERATOR_UKE_003'
+exp_name : 'ESRAGN_UKE_009'
 
 crop_size : 88
 upscale_factor : 4 # 2,4,8
-num_epochs : 300
-
+num_epochs : 1000
 num_channel : 1
-
-gan : 'srgan' # esrgan
-
+gan : 'esrgan' # esrgan
 dataset : 'UKE' # VOC2012 # UKE # UKEHR
+cache_rate : 1
+batch_size : 32 #64
 
+lr_g : 0.0001
+lr_d : 0.0001
+
+# Loss
+perceptual_loss : 'radimagenet_resnet50' # "alex", "vgg", "squeeze", "radimagenet_resnet50"
 
 perceptual_weight : 0.006 #0.006 #0.006
-adv_weight : 0 #0.001 #5e-3 #0.001
-mse_weight: 1 #0.01 #1e-2 # for esrgan use mse weight as l1_weight
-tv_weight: 0 #0.00000002 #2e-8
+adv_weight : 0.001 #0.001 #5e-3 #0.001
+mse_weight: 0 #0.01 #1e-2 # for esrgan use mse weight as l1_weight
+l1_weight : 1
+tv_weight: 0.00000002 #2e-8
 gp_weight : 10
 
-warm_up : 300
+# Warm up things
+warm_up : 50

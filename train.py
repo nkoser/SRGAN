@@ -2,67 +2,70 @@ import argparse
 import os
 from os.path import join
 
-from esrgan import EGenerator, EDiscriminator
+from loss import GeneratorLoss
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+from monai.data import DataLoader
+from esrgan import RRDBNet
 from math import log10
-
 import pandas as pd
 import torch.optim as optim
 import torch.utils.data
 import torchvision.utils as utils
 from torch.autograd import Variable
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-
 import pytorch_ssim
-from data_utils import TrainDatasetFromFolder, ValDatasetFromFolder, display_transform, TrainDataSetUKE, ValDataSetUKE, \
-    TrainDataSetUKEHR, ValDataSetUKEHR
-from loss import GeneratorLoss, EGeneratorLoss, gradient_penalty
+from data_utils import display_transform, VOC2012, UKE, UKEHR
 from model import Generator, Discriminator
 from utils import read_yaml_file, get_device
 
-# parser = argparse.ArgumentParser(description='Train Super Resolution Models')
-# parser.add_argument('--crop_size', default=88, type=int, help='training images crop size')
-# parser.add_argument('--upscale_factor', default=4, type=int, choices=[2, 4, 8],
-# help='super resolution upscale factor')
-# parser.add_argument('--num_epochs', default=100, type=int, help='train epoch number')
 
-
-def load_gen(opt_dict):
+def load_gen(opt_dict, device):
     if opt_dict['dataset'] == 'VOC2012':
-        train_set = TrainDatasetFromFolder(join(DATA_DIR, 'VOC2012_train'), crop_size=CROP_SIZE,
-                                           upscale_factor=UPSCALE_FACTOR, num_channel=NUM_CHANNEL)
-        val_set = ValDatasetFromFolder(join(DATA_DIR, 'VOC2012_val'), upscale_factor=UPSCALE_FACTOR,
-                                       num_channel=NUM_CHANNEL)
+        voc2012_dataset = VOC2012(join(DATA_DIR, 'VOC2012_train'), join(DATA_DIR, 'VOC2012_val'), opt_dict, device)
+        train_set = voc2012_dataset.get_train_dataset()
+        val_set = voc2012_dataset.get_val_dataset()
     elif opt_dict['dataset'] == 'UKE':
-        train_set = TrainDataSetUKE(join(DATA_DIR, 'UKE_pt_train', 'low_res'),
-                                    join(DATA_DIR, 'UKE_pt_train', 'high_res'))
-        val_set = ValDataSetUKE(join(DATA_DIR, 'UKE_pt_val', 'low_res'), join(DATA_DIR, 'UKE_pt_val', 'high_res'))
+
+        uke = UKE(train_path=join(DATA_DIR, 'UKE_dcm_train', 'high_res'),
+                  train_lr_path=join(DATA_DIR, 'UKE_dcm_train', 'low_res'),
+                  val_lr_path=join(DATA_DIR, 'UKE_dcm_val', 'low_res'),
+                  val_path=join(DATA_DIR, 'UKE_dcm_val', 'high_res'),
+                  config=opt_dict,
+                  device=device)
+        train_set = uke.get_train_dataset()
+        val_set = uke.get_val_dataset()
+
     elif opt_dict['dataset'] == 'UKEHR':
-        train_set = TrainDataSetUKEHR(join(DATA_DIR, 'UKE_pt_train', 'high_res'))
-        val_set = ValDataSetUKEHR(join(DATA_DIR, 'UKE_pt_val', 'high_res'))
+
+        ukehr = UKEHR(train_path=join(DATA_DIR, 'UKE_dcm_train', 'high_res'),
+                      val_path=join(DATA_DIR, 'UKE_dcm_val', 'high_res'),
+                      config=opt_dict,
+                      device=device)
+        train_set = ukehr.get_train_dataset()
+        val_set = ukehr.get_val_dataset()
     else:
         raise ValueError('Please use one of the following: VOC2012,UKE or UKEHR')
-    train_loader = DataLoader(dataset=train_set, num_workers=4, batch_size=64, shuffle=True)
-    val_loader = DataLoader(dataset=val_set, num_workers=4, batch_size=1, shuffle=False)
 
-    return train_loader,val_loader
+    train_loader = DataLoader(dataset=train_set, num_workers=0, batch_size=opt_dict['batch_size'], shuffle=True)
+    val_loader = DataLoader(dataset=val_set, num_workers=0, batch_size=1, shuffle=False)
+
+    return train_loader, val_loader
 
 
 def load_gan(opt_dict):
-    if GAN == 'srgan':
+    if opt_dict['gan'] == 'srgan':
         netG = Generator(UPSCALE_FACTOR, num_channel=NUM_CHANNEL).to(device)
         netD = Discriminator(num_channel=NUM_CHANNEL).to(device)
-    elif GAN == 'esrgan':
-        netG = EGenerator(num_channels=NUM_CHANNEL).to(device)
+    elif opt_dict['gan'] == 'esrgan':
+        netG = RRDBNet(upscale_factor=UPSCALE_FACTOR, in_channels=NUM_CHANNEL, out_channels=NUM_CHANNEL).to(device)
         netD = Discriminator(num_channel=NUM_CHANNEL).to(device)  # EDiscriminator().to(device)
     else:
         raise ValueError('Please use one of the following: srgan or esrgan')
     print('# generator parameters:', sum(param.numel() for param in netG.parameters()))
     print('# discriminator parameters:', sum(param.numel() for param in netD.parameters()))
 
-    return netG,netD
+    return netG, netD
 
 
 if __name__ == '__main__':
@@ -80,11 +83,6 @@ if __name__ == '__main__':
 
     GAN = opt_dict['gan']
 
-    PERCEPTUAL_WEIGHT = opt_dict['perceptual_weight']
-    ADV_WEIGHT = opt_dict['adv_weight']
-    MSE_WEIGHT = opt_dict['mse_weight']
-    TV_WEIGHT = opt_dict['tv_weight']
-
     GP_WEIGHT = opt_dict['gp_weight']
     WARM_UP = opt_dict['warm_up']
 
@@ -96,23 +94,15 @@ if __name__ == '__main__':
     device = get_device()
 
     # Load train_loader and validation loader
-    train_loader, val_loader = load_gen(opt_dict)
+    train_loader, val_loader = load_gen(opt_dict, device)
 
     # Load GAN Network
     netG, netD = load_gan(opt_dict)
 
-    # if GAN == 'srgan':
-    generator_criterion = GeneratorLoss(tv_weight=TV_WEIGHT,
-                                        mse_weight=MSE_WEIGHT,
-                                        perceptual_weight=PERCEPTUAL_WEIGHT,
-                                        adv_weight=ADV_WEIGHT).to(device)
-    # elif GAN == 'esrgan':
-    #    generator_criterion = EGeneratorLoss(tv_weight=TV_WEIGHT,
-    #                                         mse_weight=MSE_WEIGHT,
-    #                                         perceptual_weight=PERCEPTUAL_WEIGHT,
-    #                                         adv_weight=ADV_WEIGHT).to(device)
-    optimizerG = optim.Adam(netG.parameters())
-    optimizerD = optim.Adam(netD.parameters())
+    generator_criterion = GeneratorLoss(opt_dict).to(device)
+
+    optimizerG = optim.Adam(netG.parameters(), lr=opt_dict['lr_g'])
+    optimizerD = optim.Adam(netD.parameters(), lr=opt_dict['lr_d'])
 
     results = {'d_loss': [], 'g_loss': [], 'd_score': [], 'g_score': [], 'psnr': [], 'ssim': []}
 
@@ -122,15 +112,15 @@ if __name__ == '__main__':
 
         netG.train()
         netD.train()
-        for data, target in train_bar:
-            ##g_update_first = True
+        for batch in train_bar:
+            target = batch['image']
+            data = batch['low_res_image']
+
             batch_size = data.size(0)
             running_results['batch_sizes'] += batch_size
 
             z = Variable(data)
-            z = z.to(device)
             real_img = Variable(target)
-            real_img = real_img.to(device)
 
             if WARM_UP < epoch:
                 ############################
@@ -177,6 +167,9 @@ if __name__ == '__main__':
             if WARM_UP < epoch:
                 running_results['d_loss'] += d_loss.item() * batch_size
                 running_results['d_score'] += real_out.item() * batch_size
+            else:
+                running_results['d_loss'] += 0
+                running_results['d_score'] += 0
 
             if WARM_UP < epoch:
                 train_bar.set_description(desc='[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f' % (
@@ -199,11 +192,16 @@ if __name__ == '__main__':
             val_bar = tqdm(val_loader)
             valing_results = {'mse': 0, 'ssims': 0, 'psnr': 0, 'ssim': 0, 'batch_sizes': 0}
             val_images = []
-            for val_lr, val_hr_restore, val_hr in val_bar:
-                batch_size = val_lr.size(0)
+            for batch in val_bar:
+                val_lr = batch['low_res_image']
+                val_hr_restore = batch['recover_hr']
+                val_hr = batch['image']
+                batch_size = val_hr.size(0)
+
                 valing_results['batch_sizes'] += batch_size
-                lr = val_lr.to(device)
-                hr = val_hr.to(device)
+                lr = val_lr
+                hr = val_hr
+
                 sr = netG(lr)
                 if hr.max() > 0:
                     batch_mse = ((sr - hr) ** 2).data.mean()
@@ -219,43 +217,43 @@ if __name__ == '__main__':
                             valing_results['psnr'], valing_results['ssim']))
 
                     val_images.extend(
-                        [display_transform()(val_hr_restore.squeeze(0)), display_transform()(hr.data.cpu().squeeze(0)),
-                         display_transform()(sr.data.cpu().squeeze(0))])
+                        [display_transform()(val_hr_restore)[0, :NUM_CHANNEL, :, :].cpu(),
+                         display_transform()(hr.data)[0, :NUM_CHANNEL, :, :].cpu(),
+                         display_transform()(sr.data)[0, :NUM_CHANNEL, :, :].cpu()])
             val_images = torch.stack(val_images)
             val_images = torch.chunk(val_images, val_images.size(0) // 15)
             val_save_bar = tqdm(val_images, desc='[saving training results]')
             index = 1
-            for image in val_save_bar:
-                image = utils.make_grid(image, nrow=3, padding=5)
-                utils.save_image(image, out_path + 'epoch_%d_index_%d.png' % (epoch, index), padding=5)
-                index += 1
-                if index == 6:
-                    break
+            if epoch % 5 == 0 and epoch != 0:
+                for image in val_save_bar:
+                    image = utils.make_grid(image, nrow=3, padding=5)
+                    utils.save_image(image, out_path + 'epoch_%d_index_%d.png' % (epoch, index), padding=5)
+                    index += 1
+                    if index == 6:
+                        break
 
-                    # save model parameters
-        torch.save(netG.state_dict(), join(RESULTS_DIR, 'netG_epoch_%d_%d.pth' % (UPSCALE_FACTOR, epoch)))
+        if epoch % 50 == 0 and epoch != 0:  # save model parameters
+            torch.save(netG.state_dict(), join(RESULTS_DIR, 'netG_epoch_%d_%d.pth' % (UPSCALE_FACTOR, epoch)))
 
         if WARM_UP < epoch:
             torch.save(netD.state_dict(), join(RESULTS_DIR, 'netD_epoch_%d_%d.pth' % (UPSCALE_FACTOR, epoch)))
             # save loss\scores\psnr\ssim
             results['d_loss'].append(running_results['d_loss'] / running_results['batch_sizes'])
             results['d_score'].append(running_results['d_score'] / running_results['batch_sizes'])
+        else:
+            results['d_loss'].append(0)
+            results['d_score'].append(0)
+
         results['g_loss'].append(running_results['g_loss'] / running_results['batch_sizes'])
         results['g_score'].append(running_results['g_score'] / running_results['batch_sizes'])
         results['psnr'].append(valing_results['psnr'])
         results['ssim'].append(valing_results['ssim'])
 
-        if epoch % 10 == 1 and epoch != 0:
+        if epoch % 10 == 0 and epoch != 0:
             out_path = join(RESULTS_DIR, 'statistics/')
             os.makedirs(out_path, exist_ok=True)
-            if WARM_UP >= epoch:
-                data_frame = pd.DataFrame(
-                    data={'Loss_G': results['g_loss'],
-                          'Score_G': results['g_score'], 'PSNR': results['psnr'], 'SSIM': results['ssim']},
-                    index=range(1, epoch + 1))
-            else:
-                data_frame = pd.DataFrame(
-                    data={'Loss_D': results['d_loss'], 'Loss_G': results['g_loss'], 'Score_D': results['d_score'],
-                          'Score_G': results['g_score'], 'PSNR': results['psnr'], 'SSIM': results['ssim']},
-                    index=range(1, epoch + 1))
+            data_frame = pd.DataFrame(
+                data={'Loss_D': results['d_loss'], 'Loss_G': results['g_loss'], 'Score_D': results['d_score'],
+                      'Score_G': results['g_score'], 'PSNR': results['psnr'], 'SSIM': results['ssim']},
+                index=range(1, epoch + 1))
             data_frame.to_csv(out_path + 'srf_' + str(UPSCALE_FACTOR) + '_train_results.csv', index_label='Epoch')
