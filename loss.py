@@ -1,8 +1,11 @@
 import monai
 import torch
+from monai.losses import SSIMLoss
 from torch import nn
 from torchvision.models.vgg import vgg16, vgg19
 from torchvision.transforms import Normalize
+
+from models.vgg_loss import VGGPerceptualLoss
 
 
 class GeneratorLoss(nn.Module):
@@ -10,9 +13,10 @@ class GeneratorLoss(nn.Module):
         super(GeneratorLoss, self).__init__()
         self.tv_weight = config['tv_weight']
         self.mse_weight = config['mse_weight']
-        self.adv_weight = config['adv_weight']
         self.l1_weight = config['l1_weight']
         self.perceptual_weight = config['perceptual_weight']
+        self.ssim_weight = config['ssim_weight']
+        self.bce = nn.BCEWithLogitsLoss()
         # vgg = vgg16(pretrained=True)
 
         # layers = [IdentityConv2()]
@@ -24,33 +28,50 @@ class GeneratorLoss(nn.Module):
         # for param in loss_network.parameters():
         #    param.requires_grad = False
 
-        self.loss_network = monai.losses.PerceptualLoss(spatial_dims=2,
-                                                        network_type=config['perceptual_loss'])  # loss_network
+        if config['perceptual_loss_lib'] == 'esrgan':
+            self.loss_network = VGGPerceptualLoss(perceptual_weight=1.0,
+                                                  vgg_type='vgg19',
+                                                  use_input_norm=True,
+                                                  layer_weights=config['layer_weights'],
+                                                  style_weight=0,
+                                                  criterion='l1')
+        elif config['perceptual_loss_lib'] == 'monai':
+            self.loss_network = monai.losses.PerceptualLoss(spatial_dims=2,
+                                                            network_type=config['perceptual_loss'])
+
+            # self.loss_network =  # loss_network
         self.mse_loss = nn.MSELoss()
         self.L1_loss = nn.L1Loss()
         self.tv_loss = TVLoss()
+        self.SSIM_loss = SSIMLoss(2)
 
-    def forward(self, out_labels, out_images, target_images, only_gen):
+    def forward(self, out_images, target_images):
         if out_images.shape[1] == 1:
             out_images = out_images.repeat(1, 3, 1, 1)
             target_images = target_images.repeat(1, 3, 1, 1)
-        # Adversarial Loss
-        adversarial_loss = torch.mean(1 - out_labels)
-        # Perception Loss
-        #perception_loss = self.mse_loss(self.loss_network(normalize_vgg(out_images)),
-         #                               self.loss_network(normalize_vgg(target_images)))
-        perception_loss = self.loss_network(out_images, target_images)
-        # Image Loss
-        image_loss = self.mse_loss(out_images, target_images)
-        # TV Loss
-        tv_loss = self.tv_loss(out_images)
-        l1_loss = self.L1_loss(out_images, target_images)
-        if only_gen:
-            return (self.mse_weight * image_loss + self.perceptual_weight * perception_loss +
-                    self.tv_weight * tv_loss + self.l1_weight * l1_loss)
-        else:
-            return (self.adv_weight * adversarial_loss + self.mse_weight * image_loss +
-                    self.perceptual_weight * perception_loss + self.tv_weight * tv_loss + self.l1_weight * l1_loss)
+        loss = 0
+        if self.l1_weight > 0:
+            l1_loss = self.L1_loss(out_images, target_images)
+            loss += l1_loss
+        if self.tv_weight > 0:
+            tv_loss = self.tv_loss(out_images)
+            loss += tv_loss
+        if self.ssim_weight > 0:
+            ssim_loss = self.SSIM_loss(out_images, target_images)
+            loss += ssim_loss
+        if self.perceptual_weight > 0:
+            perception_loss = self.loss_network(out_images, target_images)
+            loss += perception_loss
+        if self.mse_weight > 0:
+            image_loss = self.mse_loss(out_images, target_images)
+            loss += image_loss
+        return loss
+
+
+class RaGANLoss(nn.Module):
+    def __init__(self):
+        super(RaGANLoss, self).__init__()
+        self.bce = nn.BCEWithLogitsLoss()
 
 
 class EGeneratorLoss(GeneratorLoss):

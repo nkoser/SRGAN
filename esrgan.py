@@ -81,7 +81,7 @@ class RRDBNet(nn.Module):
             out_channels: int = 3,
             channels: int = 64,
             growth_channels: int = 32,
-            num_rrdb: int = 15, #23,
+            num_rrdb: int = 23,
             upscale_factor: int = 4,
     ) -> None:
         super(RRDBNet, self).__init__()

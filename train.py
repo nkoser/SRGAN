@@ -3,8 +3,13 @@ import os
 from os.path import join
 
 from loss import GeneratorLoss
+from loss_utils import GANLoss
+from models.real_esrgan_gen import RealESRAGN
+from models.unet_discriminator import UNetDiscriminatorSN
+from wandb_utils import WandbUtils
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
 from monai.data import DataLoader
 from esrgan import RRDBNet
 from math import log10
@@ -17,7 +22,13 @@ from tqdm import tqdm
 import pytorch_ssim
 from data_utils import display_transform, VOC2012, UKE, UKEHR
 from model import Generator, Discriminator
-from utils import read_yaml_file, get_device
+from utils import read_yaml_file, get_device, dict_to_yaml_file
+
+
+def load_checkpoint(model: torch.nn.Module, checkpoint: str) -> torch.nn.Module:
+    checkpoint = torch.load(checkpoint)
+    model.load_state_dict(checkpoint)
+    return model
 
 
 def load_gen(opt_dict, device):
@@ -59,7 +70,10 @@ def load_gan(opt_dict):
         netD = Discriminator(num_channel=NUM_CHANNEL).to(device)
     elif opt_dict['gan'] == 'esrgan':
         netG = RRDBNet(upscale_factor=UPSCALE_FACTOR, in_channels=NUM_CHANNEL, out_channels=NUM_CHANNEL).to(device)
-        netD = Discriminator(num_channel=NUM_CHANNEL).to(device)  # EDiscriminator().to(device)
+        netD = UNetDiscriminatorSN(num_in_ch=NUM_CHANNEL).to(device)
+    elif opt_dict['gan'] == 'real-esrgan':
+        netG = RealESRAGN(num_in_ch=NUM_CHANNEL, num_out_ch=NUM_CHANNEL, scale=UPSCALE_FACTOR).to(device)
+        netD = Discriminator(num_channel=NUM_CHANNEL).to(device)
     else:
         raise ValueError('Please use one of the following: srgan or esrgan')
     print('# generator parameters:', sum(param.numel() for param in netG.parameters()))
@@ -69,6 +83,9 @@ def load_gan(opt_dict):
 
 
 if __name__ == '__main__':
+
+    # torch.manual_seed(101)
+    # torch.manual_seed(101)
 
     # replace through config
     opt_dict = read_yaml_file('config/config.yml')
@@ -87,8 +104,22 @@ if __name__ == '__main__':
     WARM_UP = opt_dict['warm_up']
 
     NUM_CHANNEL = opt_dict['num_channel']
+    ADV_TYPE = opt_dict['adv_type']
+
+    MASK_TRAINING = opt_dict['mask_training']
+    MASK_WARM_UP = opt_dict['mask_warm_up']
+
+    CHECKPOINT = opt_dict['checkpoint']
+
+    WANDB = opt_dict['wandb']
+
+    if WANDB:
+        wandb_utils = WandbUtils(opt_dict)
+        wandb_utils.connect_to_wandb()
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    dict_to_yaml_file(opt_dict, join(RESULTS_DIR, 'config.yaml'))
 
     # get device
     device = get_device()
@@ -99,10 +130,15 @@ if __name__ == '__main__':
     # Load GAN Network
     netG, netD = load_gan(opt_dict)
 
-    generator_criterion = GeneratorLoss(opt_dict).to(device)
+    # Use Checkpoint for Generator
+    if CHECKPOINT is not None:
+        netG = load_checkpoint(netG, CHECKPOINT)
 
-    optimizerG = optim.Adam(netG.parameters(), lr=opt_dict['lr_g'])
-    optimizerD = optim.Adam(netD.parameters(), lr=opt_dict['lr_d'])
+    generator_criterion = GeneratorLoss(opt_dict).to(device)
+    gan_criterion = GANLoss(ADV_TYPE, loss_weight=opt_dict['adv_weight']).to(device)
+
+    optimizerG = optim.Adam(netG.parameters(), betas=(0.9, 0.99), lr=opt_dict['lr_g'])
+    optimizerD = optim.Adam(netD.parameters(), betas=(0.9, 0.99), lr=opt_dict['lr_d'])
 
     results = {'d_loss': [], 'g_loss': [], 'd_score': [], 'g_score': [], 'psnr': [], 'ssim': []}
 
@@ -122,54 +158,63 @@ if __name__ == '__main__':
             z = Variable(data)
             real_img = Variable(target)
 
+            # Optimize generator
+
+            for p in netD.parameters():
+                p.requires_grad = False
+
+            optimizerG.zero_grad()
+
+            fake_img = netG(z)
+
+            g_loss = generator_criterion(fake_img, real_img)
+
+            if WARM_UP < epoch:
+                fake_out = netD(fake_img)
+                g_loss += gan_criterion(fake_out, True, is_disc=False)
+
+            g_loss.backward()
+            optimizerG.step()
+
             if WARM_UP < epoch:
                 ############################
                 # (1) Update D network: maximize D(x)-1-D(G(z))
+
                 ###########################
-                fake_img = netG(z)
 
-                # if GAN == 'esrgan':
-                #    gp = gradient_penalty(netD, real_img, fake_img, device=device)
+                for p in netD.parameters():
+                    p.requires_grad = True
 
-                netD.zero_grad()
-                real_out = netD(real_img).mean()
-                fake_out = netD(fake_img).mean()
-                # if GAN == 'esrgan':
-                # d_loss = -real_out - fake_out + GP_WEIGHT * gp
-                # elif GAN == 'srgan':
-                d_loss = 1 - real_out + fake_out
+                optimizerD.zero_grad()
+
+                real_out = netD(real_img)
+                l_d_real = gan_criterion(real_out, True, is_disc=True)
+                l_d_real.backward()
+
+                fake_out = netD(fake_img.detach().clone())
+                l_d_fake = gan_criterion(fake_out, False, is_disc=True)
+                l_d_fake.backward()
+
+                d_loss = l_d_real + l_d_fake
+
+                # d_loss = 1 - real_out + fake_out
                 # else:
                 # raise ValueError('Unknown GAN type')
 
-                d_loss.backward(retain_graph=True)
+                # d_loss.backward(retain_graph=True)
                 optimizerD.step()
 
-            ############################
-            # (2) Update G network: minimize 1-D(G(z)) + Perception Loss + Image Loss + TV Loss
-            ###########################
-            netG.zero_grad()
-            ## The two lines below are added to prevent runtime error in Google Colab ##
-            fake_img = netG(z)
-            fake_out = netD(fake_img).mean()
-            ##
-            g_loss = generator_criterion(fake_out, fake_img, real_img, epoch > WARM_UP)
-            g_loss.backward()
-
-            fake_img = netG(z)
-            fake_out = netD(fake_img).mean()
-
-            optimizerG.step()
-
-            # loss for current batch before optimization 
+            # loss for current batch before optimization
             running_results['g_loss'] += g_loss.item() * batch_size
-            running_results['g_score'] += fake_out.item() * batch_size
 
             if WARM_UP < epoch:
                 running_results['d_loss'] += d_loss.item() * batch_size
-                running_results['d_score'] += real_out.item() * batch_size
+                running_results['d_score'] += real_out.mean().item() * batch_size
+                running_results['g_score'] += fake_out.mean().item() * batch_size
             else:
                 running_results['d_loss'] += 0
                 running_results['d_score'] += 0
+                running_results['g_score'] += 0
 
             if WARM_UP < epoch:
                 train_bar.set_description(desc='[%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f' % (
@@ -178,11 +223,9 @@ if __name__ == '__main__':
                     running_results['d_score'] / running_results['batch_sizes'],
                     running_results['g_score'] / running_results['batch_sizes']))
             else:
-                train_bar.set_description(desc='[%d/%d] Loss_G: %.4f D(G(z)): %.4f' % (epoch, NUM_EPOCHS,
-                                                                                       running_results['g_loss'] /
-                                                                                       running_results['batch_sizes'],
-                                                                                       running_results['g_score'] /
-                                                                                       running_results['batch_sizes']))
+                train_bar.set_description(desc='[%d/%d] Loss_G: %.4f' % (epoch, NUM_EPOCHS,
+                                                                         running_results['g_loss'] /
+                                                                         running_results['batch_sizes']))
 
         netG.eval()
         out_path = join(RESULTS_DIR, 'training_results/SRF_' + str(UPSCALE_FACTOR) + '/')
@@ -249,6 +292,14 @@ if __name__ == '__main__':
         results['psnr'].append(valing_results['psnr'])
         results['ssim'].append(valing_results['ssim'])
 
+        if WANDB:
+            wandb_utils.log_metrics({'Loss_D': results['d_loss'][-1],
+                                     'Loss_G': results['g_loss'][-1],
+                                     'Score_D': results['d_score'][-1],
+                                     'Score_G': results['g_score'][-1],
+                                     'PSNR': results['psnr'][-1],
+                                     'SSIM': results['ssim'][-1]})
+
         if epoch % 10 == 0 and epoch != 0:
             out_path = join(RESULTS_DIR, 'statistics/')
             os.makedirs(out_path, exist_ok=True)
@@ -257,3 +308,6 @@ if __name__ == '__main__':
                       'Score_G': results['g_score'], 'PSNR': results['psnr'], 'SSIM': results['ssim']},
                 index=range(1, epoch + 1))
             data_frame.to_csv(out_path + 'srf_' + str(UPSCALE_FACTOR) + '_train_results.csv', index_label='Epoch')
+
+    if WANDB:
+        wandb_utils.close_wandb()
